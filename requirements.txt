@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+motor
+pydantic-settings
+python-dateutil
+APScheduler
+httpx[http2]
+pyjwt
+cryptography
+

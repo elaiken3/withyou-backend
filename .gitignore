@@ -1,0 +1,90 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# =========================
+# Virtual environments
+# =========================
+.env
+.env.*
+.venv/
+venv/
+ENV/
+env/
+
+# =========================
+# Secrets / Credentials
+# =========================
+secrets/
+*.p8
+*.pem
+*.key
+*.crt
+*.cer
+*.der
+*.jks
+*.keystore
+
+# Explicit safety
+!secrets/.gitkeep
+
+# =========================
+# Docker
+# =========================
+docker-compose.override.yml
+*.log
+*.pid
+
+# =========================
+# MongoDB
+# =========================
+data/
+mongo-data/
+dump/
+*.bson
+*.lock
+
+# =========================
+# OS / Editor junk
+# =========================
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# =========================
+# Coverage / Reports
+# =========================
+.coverage
+htmlcov/
+coverage.xml
+
+# =========================
+# Runtime artifacts
+# =========================
+*.sqlite
+*.db
+*.cache
+
+# =========================
+# Misc
+# =========================
+tmp/
+temp/
+logs/
+
