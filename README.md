@@ -1,4 +1,4 @@
-# withyou-backend
+# WithYou Backend
 
 Backend services for **With You**, a local-first support app designed to help ADHD brains get started, stay focused, and refocus without pressure or shame.
 
