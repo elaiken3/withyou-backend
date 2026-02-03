@@ -7,6 +7,13 @@ services:
       - .env
     volumes:
       - ./secrets:/app/secrets:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
   worker:
     build: .
     command: ["python", "-m", "backend.app.worker"]
@@ -14,3 +21,7 @@ services:
       - .env
     volumes:
       - ./secrets:/app/secrets:ro
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
