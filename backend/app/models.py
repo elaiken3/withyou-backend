@@ -1,11 +1,20 @@
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, Literal
 
+from .services.defaults import (
+    DEFAULT_TIMEZONE,
+    DEFAULT_QUIET_HOURS,
+    DEFAULT_MAX_PUSH_PER_DAY,
+    DEFAULT_DAILY_CHECKIN,
+    DEFAULT_FOCUS_NUDGES,
+    DEFAULT_CAPTURE_NUDGES,
+    DEFAULT_REFOCUS_NUDGES,
+)
 
 class DeviceRegisterIn(BaseModel):
     install_id: str
     device_token: str
-    timezone: str = "America/New_York"
+    timezone: str = DEFAULT_TIMEZONE
     push_enabled: bool = True
 
     # NEW — tells backend which APNs host to use
@@ -25,12 +34,12 @@ class DailyCheckin(BaseModel):
 
 
 class PrefsIn(BaseModel):
-    quiet_hours: QuietHours = QuietHours(start="22:00", end="08:00")
-    max_push_per_day: int = 2
-    daily_checkin: DailyCheckin = DailyCheckin()
-    focus_nudges: Dict[str, bool] = {"enabled": True}
-    capture_nudges: Dict[str, bool] = {"enabled": True}
-    refocus_nudges: Dict[str, bool] = {"enabled": False}
+    quiet_hours: QuietHours = QuietHours(**DEFAULT_QUIET_HOURS)
+    max_push_per_day: int = DEFAULT_MAX_PUSH_PER_DAY
+    daily_checkin: DailyCheckin = DailyCheckin(**DEFAULT_DAILY_CHECKIN)
+    focus_nudges: Dict[str, bool] = DEFAULT_FOCUS_NUDGES
+    capture_nudges: Dict[str, bool] = DEFAULT_CAPTURE_NUDGES
+    refocus_nudges: Dict[str, bool] = DEFAULT_REFOCUS_NUDGES
 
 
 class EventIn(BaseModel):

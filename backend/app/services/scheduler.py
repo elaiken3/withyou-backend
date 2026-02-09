@@ -2,9 +2,15 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from ..db import installs, devices, prefs, events_daily
-from .timeutils import local_now, in_quiet_hours
+from .timeutils import in_quiet_hours
 from .dedupe import can_send_today, already_sent, mark_sent
 from .apns import send_alert
+from .notifications import NOTIFICATION_TEMPLATES, dedupe_key
+from .defaults import (
+    DEFAULT_QUIET_HOURS,
+    DEFAULT_MAX_PUSH_PER_DAY,
+    DEFAULT_DAILY_CHECKIN,
+)
 from .rules import (
     should_send_daily_checkin,
     should_send_focus_first_step_nudge,
@@ -26,8 +32,8 @@ async def tick():
             try:
                 # Load prefs (or defaults)
                 p = await prefs.find_one({"_id": install_id}) or {}
-                qh = p.get("quiet_hours") or {"start": "22:00", "end": "08:00"}
-                max_per_day = int(p.get("max_push_per_day", 2))
+                qh = p.get("quiet_hours") or DEFAULT_QUIET_HOURS
+                max_per_day = int(p.get("max_push_per_day", DEFAULT_MAX_PUSH_PER_DAY))
 
                 # Quiet hours check (local time)
                 local_dt = datetime.now(ZoneInfo(tz))
@@ -69,15 +75,16 @@ async def tick():
                     return True
 
                 # 1) Daily check-in
-                dc = p.get("daily_checkin") or {"enabled": False, "time": "09:00"}
+                dc = p.get("daily_checkin") or DEFAULT_DAILY_CHECKIN
                 if should_send_daily_checkin(local_dt, bool(dc.get("enabled")), dc.get("time", "09:00")):
-                    key = f"{install_id}|{today_utc}|daily_checkin"
+                    key = dedupe_key(install_id, today_utc, "daily_checkin")
+                    tmpl = NOTIFICATION_TEMPLATES["daily_checkin"]
                     sent = await _send_once(
                         ntype="daily_checkin",
                         key=key,
-                        title="With You",
-                        body="Want to do a gentle check-in?",
-                        deep_link="withyou://today",
+                        title=tmpl["title"],
+                        body=tmpl["body"],
+                        deep_link=tmpl["deep_link"],
                     )
                     if sent:
                         continue  # one push per tick max
@@ -88,13 +95,14 @@ async def tick():
                     first_step_set = bool(agg.get("focus_first_step_set", False))
 
                     if focus_started_at and should_send_focus_first_step_nudge(now_utc, focus_started_at, first_step_set):
-                        key = f"{install_id}|{today_utc}|focus_first_step"
+                        key = dedupe_key(install_id, today_utc, "focus_first_step")
+                        tmpl = NOTIFICATION_TEMPLATES["focus_first_step"]
                         sent = await _send_once(
                             ntype="focus_first_step",
                             key=key,
-                            title="With You",
-                            body="Want help choosing a first step?",
-                            deep_link="withyou://focus",
+                            title=tmpl["title"],
+                            body=tmpl["body"],
+                            deep_link=tmpl["deep_link"],
                         )
                         if sent:
                             continue
@@ -103,13 +111,14 @@ async def tick():
                 if (p.get("capture_nudges") or {}).get("enabled", False):
                     captures = int(agg.get("captures_count", 0))
                     if should_send_capture_sort_nudge(captures, threshold=8):
-                        key = f"{install_id}|{today_utc}|capture_sort"
+                        key = dedupe_key(install_id, today_utc, "capture_sort")
+                        tmpl = NOTIFICATION_TEMPLATES["capture_sort"]
                         sent = await _send_once(
                             ntype="capture_sort",
                             key=key,
-                            title="With You",
-                            body="Want a 60-second sort?",
-                            deep_link="withyou://inbox",
+                            title=tmpl["title"],
+                            body=tmpl["body"],
+                            deep_link=tmpl["deep_link"],
                         )
                         if sent:
                             continue
