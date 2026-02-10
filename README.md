@@ -79,6 +79,7 @@ withyou-backend/
 ├─ docker-compose.yml
 ├─ Dockerfile
 ├─ requirements.txt
+├─ requirements-dev.txt
 └─ README.md
 ```
 Environment Variables
@@ -99,6 +100,9 @@ Environment Variables
 
 ### Scheduler
 -   `SCHEDULER_INTERVAL_SECONDS=60`
+
+### API
+-   `API_KEY=...` (optional; if set, all `/v1/*` requests must include `X-API-Key`)
   
 Running Locally
 ---------------
@@ -133,6 +137,7 @@ Register a Device
 
 ```bash
 curl -X POST http://localhost:8000/v1/devices/register\
+  -H "X-API-Key: <YOUR_API_KEY>"\
   -H "Content-Type: application/json"\
   -d '{
     "install_id": "dev-local-1",

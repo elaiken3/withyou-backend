@@ -31,7 +31,7 @@ async def register_device(payload: DeviceRegisterIn):
                 "push_enabled": payload.push_enabled,
                 "last_seen_at": now,
                 # keep a copy here too so you can route per-install if needed
-                "apns_environment": getattr(payload, "apns_environment", None),
+                "apns_environment": payload.apns_environment,
             },
         },
         upsert=True,
@@ -46,7 +46,7 @@ async def register_device(payload: DeviceRegisterIn):
                 "install_id": payload.install_id,
                 "platform": "ios",
                 "updated_at": now,
-                "apns_environment": getattr(payload, "apns_environment", None),
+                "apns_environment": payload.apns_environment,
             },
         },
         upsert=True,
