@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     scheduler_interval_seconds: int = Field(60, alias="SCHEDULER_INTERVAL_SECONDS")
 
-settings = Settings()
+    api_key: Optional[str] = Field(None, alias="API_KEY")
 
+settings = Settings()
 

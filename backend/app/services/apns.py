@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from typing import Optional, Dict, Any
 
@@ -9,9 +10,17 @@ import jwt  # PyJWT
 from ..config import settings
 
 
-_client: Optional[httpx.Client] = None
+class APNSTokenInvalid(RuntimeError):
+    def __init__(self, status_code: int, reason: str | None):
+        super().__init__(f"APNs token invalid: status={status_code} reason={reason}")
+        self.status_code = status_code
+        self.reason = reason
+
+
+_client: Optional[httpx.AsyncClient] = None
 _cached_jwt: Optional[str] = None
 _cached_jwt_exp: int = 0  # unix seconds
+logger = logging.getLogger("withyou.apns")
 
 
 def apns_configured() -> bool:
@@ -25,22 +34,28 @@ def apns_configured() -> bool:
     )
 
 
-def _apns_base_url() -> str:
-    return "https://api.sandbox.push.apple.com" if settings.apns_use_sandbox else "https://api.push.apple.com"
+def _apns_base_url(apns_environment: Optional[str]) -> str:
+    if apns_environment == "sandbox":
+        use_sandbox = True
+    elif apns_environment == "production":
+        use_sandbox = False
+    else:
+        use_sandbox = settings.apns_use_sandbox
+    return "https://api.sandbox.push.apple.com" if use_sandbox else "https://api.push.apple.com"
 
 
-def _get_http2_client() -> httpx.Client:
+def _get_http2_client() -> httpx.AsyncClient:
     global _client
     if _client is None:
-        _client = httpx.Client(http2=True, timeout=httpx.Timeout(10.0, connect=10.0))
+        _client = httpx.AsyncClient(http2=True, timeout=httpx.Timeout(10.0, connect=10.0))
     return _client
 
 
-def close_client() -> None:
+async def close_client() -> None:
     """Optional: call on graceful shutdown."""
     global _client
     if _client is not None:
-        _client.close()
+        await _client.aclose()
         _client = None
 
 
@@ -78,15 +93,16 @@ def _get_apns_jwt() -> str:
     return token
 
 
-def send_alert(
+async def send_alert(
     device_token: str,
     title: str,
     body: str,
     badge: int | None = None,
     deep_link: str | None = None,
+    apns_environment: Optional[str] = None,
 ) -> None:
     if not apns_configured():
-        print("[APNS NOT CONFIGURED] Would have sent:", title, body)
+        logger.info("[APNS NOT CONFIGURED] Would have sent: %s %s", title, body)
         return
 
     auth = _get_apns_jwt()
@@ -103,7 +119,7 @@ def send_alert(
     if deep_link:
         payload["deep_link"] = deep_link
 
-    url = f"{_apns_base_url()}/3/device/{device_token}"
+    url = f"{_apns_base_url(apns_environment)}/3/device/{device_token}"
 
     headers = {
         "authorization": f"bearer {auth}",
@@ -114,7 +130,7 @@ def send_alert(
         "content-type": "application/json",
     }
 
-    r = client.post(url, headers=headers, json=payload)
+    r = await client.post(url, headers=headers, json=payload)
 
     if r.status_code != 200:
         try:
@@ -123,4 +139,9 @@ def send_alert(
             detail = {"body": r.text}
 
         apns_id = r.headers.get("apns-id")
+        reason = None
+        if isinstance(detail, dict):
+            reason = detail.get("reason")
+        if r.status_code in (400, 410) and reason in {"BadDeviceToken", "Unregistered", "DeviceTokenNotForTopic"}:
+            raise APNSTokenInvalid(r.status_code, reason)
         raise RuntimeError(f"APNs send failed: {r.status_code} apns-id={apns_id} detail={detail}")

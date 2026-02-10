@@ -1,10 +1,12 @@
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from ..db import installs, devices, prefs, events_daily
+import logging
+
+from ..db import installs, devices, prefs, events_daily, worker_heartbeat
 from .timeutils import in_quiet_hours
 from .dedupe import can_send_today, already_sent, mark_sent
-from .apns import send_alert
+from .apns import send_alert, APNSTokenInvalid
 from .notifications import NOTIFICATION_TEMPLATES, dedupe_key
 from .defaults import (
     DEFAULT_QUIET_HOURS,
@@ -16,12 +18,21 @@ from .rules import (
     should_send_focus_first_step_nudge,
     should_send_capture_sort_nudge
 )
+from ..config import settings
+
+logger = logging.getLogger("withyou.scheduler")
 
 async def tick():
     now_utc = datetime.now(timezone.utc)
     today_utc = now_utc.date().isoformat()
 
-    print(f"[scheduler] tick ran at {now_utc.isoformat()}")
+    logger.info("tick ran at %s", now_utc.isoformat())
+
+    await worker_heartbeat.update_one(
+        {"_id": "scheduler"},
+        {"$set": {"last_tick_at": now_utc}},
+        upsert=True,
+    )
 
     try:
         cursor = installs.find({"push_enabled": True})
@@ -53,6 +64,7 @@ async def tick():
                     # print(f"[scheduler] {install_id}: skipped (no device)")
                     continue
                 token = dev["_id"]
+                apns_environment = dev.get("apns_environment")
 
                 # Today's aggregate doc
                 agg_id = f"{install_id}|{today_utc}"
@@ -64,19 +76,34 @@ async def tick():
                         return False
 
                     try:
-                        send_alert(token, title, body, deep_link=deep_link)
+                        await send_alert(
+                            token,
+                            title,
+                            body,
+                            deep_link=deep_link,
+                            apns_environment=apns_environment,
+                        )
+                    except APNSTokenInvalid as e:
+                        await devices.delete_one({"_id": token})
+                        logger.warning("%s: removed invalid token: %s", install_id, repr(e))
+                        return False
                     except Exception as e:
                         # Don't crash the worker on APNs failures
-                        print(f"[scheduler] {install_id}: APNs error for {ntype}: {repr(e)}")
+                        logger.warning("%s: APNs error for %s: %s", install_id, ntype, repr(e))
                         return False
 
                     await mark_sent(key, install_id, today_utc, ntype)
-                    print(f"[scheduler] {install_id}: sent {ntype}")
+                    logger.info("%s: sent %s", install_id, ntype)
                     return True
 
                 # 1) Daily check-in
                 dc = p.get("daily_checkin") or DEFAULT_DAILY_CHECKIN
-                if should_send_daily_checkin(local_dt, bool(dc.get("enabled")), dc.get("time", "09:00")):
+                if should_send_daily_checkin(
+                    local_dt,
+                    bool(dc.get("enabled")),
+                    dc.get("time", "09:00"),
+                    window_seconds=settings.scheduler_interval_seconds,
+                ):
                     key = dedupe_key(install_id, today_utc, "daily_checkin")
                     tmpl = NOTIFICATION_TEMPLATES["daily_checkin"]
                     sent = await _send_once(
@@ -125,9 +152,9 @@ async def tick():
 
             except Exception as e:
                 # Catch per-install failures so one bad record doesn't break the tick
-                print(f"[scheduler] {install_id}: error processing install: {repr(e)}")
+                logger.exception("%s: error processing install", install_id)
                 continue
 
     except Exception as e:
         # Catch cursor-level / DB connectivity issues
-        print(f"[scheduler] fatal tick error: {repr(e)}")
+        logger.exception("fatal tick error")
