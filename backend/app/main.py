@@ -16,7 +16,12 @@ app.include_router(events.router)
 async def startup():
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO)
-    await ensure_indexes()
+    try:
+        await ensure_indexes()
+    except Exception:
+        logging.getLogger("withyou.startup").exception(
+            "Mongo unavailable during startup; skipping ensure_indexes"
+        )
 
 
 @app.middleware("http")

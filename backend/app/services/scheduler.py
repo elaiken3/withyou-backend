@@ -28,11 +28,15 @@ async def tick():
 
     logger.info("tick ran at %s", now_utc.isoformat())
 
-    await worker_heartbeat.update_one(
-        {"_id": "scheduler"},
-        {"$set": {"last_tick_at": now_utc}},
-        upsert=True,
-    )
+    # Heartbeat is operational telemetry only; do not fail tick if it cannot be written.
+    try:
+        await worker_heartbeat.update_one(
+            {"_id": "scheduler"},
+            {"$set": {"last_tick_at": now_utc}},
+            upsert=True,
+        )
+    except Exception:
+        logger.warning("heartbeat write failed", exc_info=True)
 
     try:
         cursor = installs.find({"push_enabled": True})
