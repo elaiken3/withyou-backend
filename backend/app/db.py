@@ -1,7 +1,8 @@
+import certifi
 from motor.motor_asyncio import AsyncIOMotorClient
 from .config import settings
 
-_client = AsyncIOMotorClient(settings.mongo_uri)
+_client = AsyncIOMotorClient(settings.mongo_uri, tlsCAFile=certifi.where())
 db = _client[settings.mongo_db]
 
 installs = db["installs"]
