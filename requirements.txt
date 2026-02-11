@@ -7,3 +7,4 @@ APScheduler
 httpx[http2]
 pyjwt
 cryptography
+certifi
