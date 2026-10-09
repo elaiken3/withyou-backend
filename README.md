@@ -111,7 +111,7 @@ withyou-backend/
 | `APNS_TEAM_ID` | for pushes | — | Apple team ID |
 | `APNS_KEY_ID` | for pushes | — | ID of the .p8 key |
 | `APNS_AUTH_KEY_PATH` | for pushes | — | Path to the .p8 key, e.g. `/app/secrets/AuthKey_XXXX.p8` |
-| `APNS_AUTH_KEY_B64` | no | — | If set, `entrypoint.sh` decodes it into `APNS_AUTH_KEY_PATH` at start (used on Fly). Keep the path under `/app/secrets`: the container runs as a non-root user. |
+| `APNS_AUTH_KEY_B64` | no | — | If set, `entrypoint.sh` decodes it into `APNS_AUTH_KEY_PATH` at start (used on Fly). The container runs as a non-root user that can only write under `/app`; if the path's folder isn't writable, the key is written to `/app/secrets/` instead (same file name) and the app is pointed there. A failed write never stops startup; pushes are skipped and logged. |
 | `APNS_TOPIC` | for pushes | — | Bundle ID, e.g. `com.commongenelabs.WithYou` |
 | `APNS_USE_SANDBOX` | no | `true` | Fallback host when a device has no `apns_environment` |
 | `SCHEDULER_INTERVAL_SECONDS` | no | `60` | Worker tick interval; `/ready` fails if the last tick is older than 3× this |
