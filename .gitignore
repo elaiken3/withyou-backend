@@ -1,33 +1,19 @@
 # =========================
-# Python
+# Supabase
 # =========================
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-*.so
-*.egg-info/
-.eggs/
-dist/
-build/
-pip-wheel-metadata/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+supabase/.branches/
+supabase/.temp/
+supabase/functions/.env
+supabase/functions/**/.env
+supabase/.env
 
 # =========================
-# Virtual environments
+# Environment / secrets
 # =========================
 .env
 .env.*
-.venv/
-venv/
-ENV/
-env/
-
-# =========================
-# Secrets / Credentials
-# =========================
+!.env.example
+*.env
 secrets/
 *.p8
 *.pem
@@ -38,24 +24,12 @@ secrets/
 *.jks
 *.keystore
 
-# Explicit safety
-!secrets/.gitkeep
-
 # =========================
-# Docker
+# Deno / Node
 # =========================
-docker-compose.override.yml
-*.log
-*.pid
-
-# =========================
-# MongoDB
-# =========================
-data/
-mongo-data/
-dump/
-*.bson
-*.lock
+node_modules/
+.deno/
+coverage/
 
 # =========================
 # OS / Editor junk
@@ -68,23 +42,8 @@ Thumbs.db
 *.swo
 
 # =========================
-# Coverage / Reports
-# =========================
-.coverage
-htmlcov/
-coverage.xml
-
-# =========================
-# Runtime artifacts
-# =========================
-*.sqlite
-*.db
-*.cache
-
-# =========================
 # Misc
 # =========================
+*.log
 tmp/
 temp/
-logs/
-
