@@ -1,307 +1,220 @@
 # WithYou Backend
 
-Backend services for **With You**, a local-first support app designed to help ADHD brains get started, stay focused, and refocus without pressure or shame.
+Backend for **With You**, a local-first support app that helps ADHD brains get started, stay focused, and refocus without pressure or shame.
 
-This service powers:
-- Push notifications (APNs)
-- User-scheduled reminders (a daily check-in at a time the user picks)
-- Gentle, opt-in nudges
-- Privacy-respecting event counts
+The app works fully without this backend. Reminders and the daily check-in are local notifications on the phone, and AI features run on the device (Apple Intelligence) or fall back to simple rules. This backend does one optional thing: **cloud AI** for people who turn it on in Settings, through one Supabase Edge Function, `ai`, that calls Claude.
 
-The backend is intentionally lightweight, readable, and explainable — optimized for human-paced interactions rather than growth hacking. See [WITHYOU_BACKEND_PRINCIPLES.md](WITHYOU_BACKEND_PRINCIPLES.md) (the rules) and [ARCHITECTURE.md](ARCHITECTURE.md) (how it fits together).
+See [WITHYOU_BACKEND_PRINCIPLES.md](WITHYOU_BACKEND_PRINCIPLES.md) (the rules), [ARCHITECTURE.md](ARCHITECTURE.md) (how it fits together) and [docs/CUTOVER.md](docs/CUTOVER.md) (setting up the Supabase project and retiring the old Fly.io + MongoDB backend).
 
 ---
 
-## Core Principles
+## Core principles
 
-- **Local-first**: The app works fully offline. The backend enhances reliability and support, not control.
-- **No accounts (v1)**: Identity is a generated install ID plus a per-install secret. No logins.
-- **Privacy-respecting**: No task text, no content ingestion — only small counts and timestamps, kept for 35 days.
-- **Gentle by design**: Quiet hours, a daily cap, one push per tick, and dedupe so nothing repeats.
-- **Explainable nudges**: Every notification can be traced to a clear, user-understandable reason.
-- **User-controlled deletion**: `DELETE /v1/installs/{install_id}` removes everything stored for an install.
+- **Off by default.** Cloud AI only runs after the person turns it on, with a plain explanation of what is sent.
+- **Nothing stored with your words.** The server never stores the text of a request or the model's reply, and never logs them. It keeps only per-day request counts, deleted after 35 days.
+- **No accounts.** Each install signs in anonymously (a random id, no email, no password).
+- **Suggestions, not actions.** The AI suggests; the app shows it and the person decides.
+- **Gentle limits.** Daily per-person and global limits keep costs predictable. Reaching one is never framed as a failure, and the app falls back to on-device AI or rules.
+- **User-controlled deletion.** The `delete_me` task removes everything WithYou stores for that person (their usage counts and anonymous account). Supabase's short-lived platform request logs expire on their own.
 
 ---
 
-## What This Backend Does
+## What is sent and stored
 
-### Push notifications
-- Token-based APNs integration (.p8), HTTP/2
-- Per-device `apns_environment` (`sandbox` for Xcode builds, `production` for TestFlight / App Store)
-- Deep links into the app
-- Invalid tokens (`BadDeviceToken`, `Unregistered`, `DeviceTokenNotForTopic`) are deleted automatically
-
-### Notifications the worker can send
-
-Nothing is sent until the app has saved prefs with `PUT /v1/prefs/{install_id}`. Every send respects quiet hours and the daily cap.
-
-| Type | When | Default |
+| Where | What | Kept |
 | --- | --- | --- |
-| `daily_checkin` — "Want to do a gentle check-in?" | Once per local day, at or after the chosen local time, within a 2 hour grace window | off |
-| `capture_sort` — "Want a 60-second sort?" | Once per local day, after 8+ captures that day | on |
-| `focus_first_step` — "Want help choosing a first step?" | Once per local day, 7–10 min into a focus session with no first step | **off (opt-in)** |
-
-**Why focus nudges are opt-in:** the focus first-step nudge arrives *during* a focus session. That interrupts the session it is meant to support ("During a Focus Session: nothing else matters"), so it is only sent if the user turns it on.
-
-**Grace window:** the check-in does not have to land in the exact minute. If a tick is late (deploy, restart, quiet hours ending), it still goes out within 2 hours of the chosen time. After that the day is skipped — no catch-up sends.
-
-### Guardrails
-- Quiet hours in the install's local time (default 22:00–08:00, may wrap midnight)
-- `max_push_per_day` (default 2, max 5; 0 turns pushes off) counted per **local** day
-- At most one push per install per tick
-- Claim-first dedupe: a `push_log` record is inserted (unique per install + local day + type) *before* sending, so two workers can never both send the same notification. If APNs rejects the send, the record is removed and a later tick may retry silently. If the outcome is unknown (timeout after the request went out), it is not retried — a missed nudge is better than a duplicate.
-
----
-
-## Tech Stack
-
-- **Language**: Python 3.12
-- **API**: FastAPI
-- **Database**: MongoDB Atlas (via Motor — see follow-ups)
-- **Scheduler**: APScheduler (separate worker process)
-- **Push**: Apple Push Notification Service (APNs)
-- **Containerization**: Docker, deployed on Fly.io
-
----
-
-## Repository Structure
-
-```text
-withyou-backend/
-├─ backend/
-│  └─ app/
-│     ├─ main.py              # FastAPI app: lifespan, API key check, /health, /ready
-│     ├─ config.py            # Environment-driven settings
-│     ├─ db.py                # Mongo client, collections, indexes (incl. TTL)
-│     ├─ auth.py              # API key + per-install secret checks
-│     ├─ models.py            # Pydantic request models and validation
-│     ├─ worker.py            # Scheduler process
-│     ├─ routes/
-│     │  ├─ devices.py        # POST /v1/devices/register
-│     │  ├─ prefs.py          # PUT /v1/prefs/{install_id}
-│     │  ├─ events.py         # POST /v1/events
-│     │  └─ installs.py       # DELETE /v1/installs/{install_id}
-│     └─ services/
-│        ├─ apns.py           # APNs HTTP/2 client + JWT auth
-│        ├─ scheduler.py      # The worker tick: who gets which push now
-│        ├─ rules.py          # Pure "is it due?" rules
-│        ├─ dedupe.py         # Claim-first dedupe + daily cap counts
-│        ├─ events.py         # Daily event rollup updates
-│        ├─ notifications.py  # Notification copy + dedupe keys
-│        ├─ defaults.py       # Default prefs and limits
-│        └─ timeutils.py      # Quiet hours, local days, timezone fallback
-├─ tests/                     # pytest suite (mongomock-motor, no real Mongo needed)
-├─ secrets/                   # Mounted at runtime (NOT committed)
-├─ docker-compose.yml
-├─ Dockerfile
-├─ fly.toml
-├─ pyproject.toml             # ruff + pytest config
-├─ requirements.txt           # pinned runtime deps
-└─ requirements-dev.txt       # + pytest, pytest-asyncio, mongomock-motor, ruff
-```
-
----
-
-## Environment Variables
-
-| Variable | Required | Default | Notes |
-| --- | --- | --- | --- |
-| `MONGO_URI` | yes | — | MongoDB connection string |
-| `MONGO_DB` | no | `withyou` | Database name |
-| `APNS_TEAM_ID` | for pushes | — | Apple team ID |
-| `APNS_KEY_ID` | for pushes | — | ID of the .p8 key |
-| `APNS_AUTH_KEY_PATH` | for pushes | — | Path to the .p8 key, e.g. `/app/secrets/AuthKey_XXXX.p8` |
-| `APNS_AUTH_KEY_B64` | no | — | If set, `entrypoint.sh` decodes it into `APNS_AUTH_KEY_PATH` at start (used on Fly). The container runs as a non-root user that can only write under `/app`; if the path's folder isn't writable, the key is written to `/app/secrets/` instead (same file name) and the app is pointed there. A failed write never stops startup; pushes are skipped and logged. |
-| `APNS_TOPIC` | for pushes | — | Bundle ID, e.g. `com.commongenelabs.WithYou` |
-| `APNS_USE_SANDBOX` | no | `true` | Fallback host when a device has no `apns_environment` |
-| `SCHEDULER_INTERVAL_SECONDS` | no | `60` | Worker tick interval; `/ready` fails if the last tick is older than 3× this |
-| `API_KEY` | no | — | If set, every `/v1/*` request must send a matching `X-API-Key` |
-
-If the APNs variables are missing, the worker logs what it *would* have sent instead of sending.
+| Request to the `ai` function | The text of that one request (for example the words to sort, or a task title), plus the person's anonymous access token | Not stored |
+| Request to Anthropic (Claude) | The same text, wrapped in a fixed prompt | Not stored by WithYou. Anthropic processes it under its API terms |
+| `public.ai_usage` | anonymous user id, UTC day, request count | 35 days (deleted daily by `pg_cron`), or until `delete_me` |
+| `public.ai_usage_global` | UTC day, total request count | 35 days |
+| `auth.users` | the anonymous user Supabase Auth creates on sign-in | until `delete_me` |
+| Function logs | task name, HTTP status, latency, error class | Supabase log retention. Never request text, model output, tokens or user ids |
+| Supabase platform logs (API gateway, Auth, Edge Functions) | IP address, user agent, time and request path; Auth logs also hold the anonymous user id. Never request text | Supabase's log retention (1 day on Free, 7 days on Pro). Not removed by `delete_me` |
 
 ---
 
 ## API
 
-### Authentication
+`POST https://<project-ref>.supabase.co/functions/v1/ai`
 
-| Header | Where | Behaviour |
+Headers:
+
+| Header | Value |
+| --- | --- |
+| `apikey` | the project's publishable (or legacy anon) key |
+| `Authorization` | `Bearer <access token from Supabase anonymous sign-in>` |
+| `Content-Type` | `application/json` |
+
+Body (at most 16 KB; unknown fields are ignored):
+
+```json
+{"task": "<task>", "input": { ... }}
+```
+
+Success: HTTP 200 `{"ok": true, "task": "<task>", "result": { ... }}`
+
+Error: `{"ok": false, "error": "<code>", "message": "<short human text>"}`
+
+| Status | `error` | When |
 | --- | --- | --- |
-| `X-API-Key` | all `/v1/*` | Required only when `API_KEY` is set. Wrong or missing → `401`. Compared in constant time. |
-| `X-Install-Secret` | `PUT /v1/prefs/{id}`, `POST /v1/events`, `DELETE /v1/installs/{id}` | Required. Missing → `401`, unknown install → `404`, wrong secret or install has no secret yet → `403`. |
-| `X-Install-Secret` | `POST /v1/devices/register` | Optional. Wrong → `403`. Missing is accepted (older app builds) and logged. |
+| 400 | `invalid_input` | the body isn't JSON, the task is unknown, or `input` breaks the rules below |
+| 401 | `unauthorized` | no `Authorization: Bearer` token, or Supabase Auth doesn't accept it |
+| 405 | `method_not_allowed` | anything but `POST` (also sends `Allow: POST`) |
+| 413 | `too_large` | body over 16 KB |
+| 429 | `quota_exceeded` | a daily limit is reached; `Retry-After` is the seconds until the next UTC midnight |
+| 502 | `upstream_error` | Claude declined, timed out, failed, or answered in an unusable shape |
+| 503 | `not_configured` | `ANTHROPIC_API_KEY` isn't set (AI tasks only; `delete_me` still works) |
+| 500 | `internal` | anything else (for example the database is unreachable) |
 
-The install secret is a random URL-safe token returned **once**, by the first registration of an install. Only its SHA-256 hash is stored. The app must keep it (e.g. in the Keychain) and send it on later calls.
+All string outputs are plain text (no markdown), trimmed, and capped to the lengths below. Numbers are rounded and clamped into range.
 
-Invalid input is rejected with `422` (see each endpoint for the rules).
+Order of checks: method, size, access token, JSON and task, input. Only a request that passes all of them counts toward the daily limit, and it counts before Claude is called (so a 502 still counts).
 
-### `GET /health`
-Liveness: `{"ok": true}` if the process is up. Does not touch Mongo. Used by Fly and docker-compose health checks.
-
-### `GET /ready`
-Readiness: `200 {"ok": true}` when Mongo answers a ping **and** the worker heartbeat (`worker_heartbeat.last_tick_at`) is at most 3 × `SCHEDULER_INTERVAL_SECONDS` old; otherwise `503 {"ok": false, "reason": "..."}`. Use it for external monitoring.
-
-### `POST /v1/devices/register`
-
-```json
-{
-  "install_id": "E621E1F8-C36C-495A-93FC-0C247A3E6E5F",
-  "device_token": "<64-200 hex chars>",
-  "timezone": "America/New_York",
-  "push_enabled": true,
-  "apns_environment": "production"
-}
-```
-
-- `install_id`: 8–64 chars, `[A-Za-z0-9-]`
-- `device_token`: hex, 64–200 chars
-- `timezone`: a valid IANA zone name (default `America/New_York`)
-- `apns_environment`: `"sandbox"`, `"production"` or omitted
-
-Response: `{"ok": true, "install_has_secret": true}`, plus `"install_secret": "<token>"` only when a new secret was issued (the install had none). If an app holds no secret and gets none back while `install_has_secret` is true, the secret went to an earlier build that discarded it; the app starts over with a fresh `install_id` (the server never re-issues a secret).
-
-### `PUT /v1/prefs/{install_id}` (needs `X-Install-Secret`)
+### `capture`: turn typed or spoken text into one or more items
 
 ```json
-{
-  "quiet_hours": {"start": "22:00", "end": "08:00"},
-  "max_push_per_day": 2,
-  "daily_checkin": {"enabled": true, "time": "09:00"},
-  "focus_nudges": {"enabled": false},
-  "capture_nudges": {"enabled": true},
-  "refocus_nudges": {"enabled": false}
-}
+{"text": "string, 1-4000 characters",
+ "now": "2026-10-09T14:05:00-04:00",
+ "timezone": "America/New_York",
+ "morning_hour": 9, "evening_hour": 19}
 ```
 
-All fields are optional and default to the values shown. Times are `HH:MM` (00–23 : 00–59) in the install's local time. `max_push_per_day` is 0–5. Response: `{"ok": true}`.
-
-### `POST /v1/events` (needs `X-Install-Secret`)
+`now` is the device's local time with its UTC offset (required). `timezone` is an IANA name (required). `morning_hour` and `evening_hour` are optional (defaults 9 and 19).
 
 ```json
-{
-  "install_id": "E621E1F8-C36C-495A-93FC-0C247A3E6E5F",
-  "event_type": "capture_added",
-  "ts": "2026-02-10T14:03:00Z",
-  "meta": {"count": 1}
-}
+{"items": [
+  {"title": "1-80, verb first when natural",
+   "first_step": "1-100, a tiny concrete action under 2 minutes",
+   "estimate_minutes": 1,
+   "when": null}
+]}
 ```
 
-- `event_type`: `capture_added`, `refocus_opened`, `focus_session_started`, `focus_first_step_set`
-- `ts`: ISO 8601; without an offset it is treated as UTC
-- `meta.count` (capture_added): integer 1–100, default 1. `meta.has_first_step` (focus_session_started): boolean. Other `meta` keys are ignored and never stored.
+1 to 12 items. `when` is `null` unless the text names a day or time, then `{"day_offset": 0-30, "hour": 0-23, "minute": 0-59}`, with `day_offset` counted from `now`'s local date ("tomorrow" is 1, "tonight" is 0 at `evening_hour`, "this weekend" is the coming Saturday at `morning_hour`). A model answer more than 30 days out becomes `null` (Inbox) rather than a wrong date.
 
-Events are rolled up per install per **local** day (the install's timezone). Response: `{"ok": true}`.
+### `break_down`: split a task into tiny steps
 
-### `DELETE /v1/installs/{install_id}` (needs `X-Install-Secret`)
+Input `{"title": "1-200", "current_step": "0-200, optional"}`. Result `{"steps": ["2 to 5 steps, each 1-100 characters, verb first"]}`.
 
-Deletes the install and all of its devices, prefs, daily event rollups and push records. `404` if the install is unknown. Response: `{"ok": true}`.
+### `stuck_help`: one gentle next move when stuck
+
+Input `{"title": "1-200", "blocker": "dont_know_where_to_start" | "too_big" | "boring" | "worried" | "low_energy" | "distracted", "energy": "low" | "okay" | "good" | null}`. Result `{"message": "1-160", "step": "1-100", "minutes": 1-10}`.
+
+### `suggest_next`: pick one thing to do now
+
+Input `{"energy": "low" | "okay" | "good" | null, "minutes_available": null | 5-240, "candidates": [{"id": "1-128 characters, unique", "title": "1-200", "estimate_minutes": null | 1-240, "scheduled_in_minutes": null | -1440-10080}]}` with 1 to 30 candidates. Result `{"id": "<one of the candidate ids>", "reason": "1-120", "first_step": "1-100"}`. The app's ids are never sent to Claude; it sees short keys that the function maps back.
+
+### `tidy`: tidy up thoughts jotted down during a focus session
+
+Input `{"thoughts": ["1 to 30 strings, 1-500 characters each"]}`. Result `{"items": [{"title": "1-80", "first_step": "1-100"}]}`, same count and order as the input.
+
+### `delete_me`: delete everything the server holds for this person
+
+Input `{}`. Result `{"deleted": true}`. Deletes the person's usage rows and their anonymous auth user. Doesn't count toward the limits and works even when cloud AI isn't configured.
 
 ---
 
-## What Is Sent and Stored
+## Limits
 
-Push payloads contain only fixed, gentle copy (title "With You", one of the lines in the table above) and a deep link. No user content is ever sent.
-
-| Collection | Contents | Kept |
+| Setting | Default | Meaning |
 | --- | --- | --- |
-| `installs` | install ID, timezone, push enabled, APNs environment, created / last seen times, SHA-256 hash of the install secret | until deleted |
-| `devices` | APNs token, install ID, platform, APNs environment, created / updated times | until deleted, or until APNs reports the token invalid |
-| `prefs` | the prefs above + updated time | until deleted |
-| `events_daily` | per install per local day: capture count, refocus-open count, focus start time and whether a first step was set | **35 days** after the last update (TTL index on `updated_at`) |
-| `push_log` | per sent notification: install ID, type, local date, sent time (used for dedupe and the daily cap) | **35 days** (TTL index on `sent_at`) |
-| `worker_heartbeat` | time of the worker's last tick | single doc |
+| `AI_DAILY_LIMIT_PER_USER` | 60 | requests per anonymous user per UTC day |
+| `AI_DAILY_LIMIT_GLOBAL` | 3000 | requests from everyone together per UTC day |
 
-No task text, no productivity scores, no completion rates. Mongo's TTL monitor removes expired docs within about a minute of expiry.
+The counting is one atomic database call (`public.ai_consume_quota`). Setting either limit to `0` turns cloud AI off (every AI request gets 429, and the app quietly uses on-device AI or rules).
 
 ---
 
-## Running Locally
+## Configuration
 
-### 1) Configure
+Edge Function secrets (`supabase secrets set NAME=value`):
 
-Create `.env` with at least `MONGO_URI` (and the APNs variables if you want real pushes). Place your Apple `.p8` key at:
+| Name | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `ANTHROPIC_API_KEY` | yes | none | Without it, AI tasks return 503 `not_configured` |
+| `CLAUDE_MODEL` | no | `claude-opus-5-5` | `claude-haiku-5-5` is a much cheaper option (see cost below) |
+| `AI_DAILY_LIMIT_PER_USER` | no | `60` | whole number, `0` turns cloud AI off |
+| `AI_DAILY_LIMIT_GLOBAL` | no | `3000` | whole number, `0` turns cloud AI off |
+| `ANTHROPIC_BASE_URL` | no | Anthropic's API | only for tests (CI points it at an unreachable address) |
+
+Set by Supabase for every function (nothing to do): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`. If the service role key is ever absent, the function uses `SUPABASE_SECRET_KEY`, then the `default` entry of `SUPABASE_SECRET_KEYS`.
+
+GitHub Actions secrets for deploys: `SUPABASE_ACCESS_TOKEN`, `SUPABASE_PROJECT_REF`, `SUPABASE_DB_PASSWORD`. Without them the deploy workflow skips with a notice.
+
+### Model and cost
+
+Requests use Claude Opus 5.5 by default: one message with a JSON schema for the answer, low effort, and Anthropic's server-side fallback model if Claude declines (`fallbacks: "default"`; not available on Haiku). A typical request is about 1,000 input tokens and a few hundred output tokens (including low-effort thinking).
+
+| Model | Price per million tokens (input / output) | Typical cost per request |
+| --- | --- | --- |
+| `claude-opus-5-5` (default) | $4 / $20 | about 1 to 3 US cents |
+| `claude-haiku-5-5` | $0.10 / $0.50 | well under a tenth of a cent |
+
+The global limit caps the worst case: at 3,000 requests a day on Opus 5.5 that is roughly $30 to $90 a day. Set `AI_DAILY_LIMIT_GLOBAL` to what you're comfortable spending and add a spend limit in the Anthropic Console. Switching models is one command (`supabase secrets set CLAUDE_MODEL=claude-haiku-5-5`); no redeploy is needed. Prices are Anthropic's list prices as of October 2026.
+
+---
+
+## Repository structure
 
 ```text
-./secrets/AuthKey_XXXX.p8
-```
-
-The container runs as an unprivileged user (uid 10001), so the key file must be world-readable on the host (`chmod 644`).
-
-### 2) Start services
-
-```bash
-docker compose up --build
-```
-
-This starts:
-
-- API → `http://localhost:8000`
-- Worker → background scheduler for pushes
-
-### 3) Health and readiness
-
-```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/ready
-```
-
-### 4) Register a device
-
-```bash
-curl -X POST http://localhost:8000/v1/devices/register \
-  -H "X-API-Key: <YOUR_API_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "install_id": "dev-local-1",
-    "device_token": "<APNS_TOKEN_FROM_XCODE>",
-    "timezone": "America/New_York",
-    "push_enabled": true,
-    "apns_environment": "sandbox"
-  }'
-# -> {"ok": true, "install_has_secret": true, "install_secret": "..."}   (secret: first time only; keep it)
-```
-
-Then save prefs so the worker has something to do:
-
-```bash
-curl -X PUT http://localhost:8000/v1/prefs/dev-local-1 \
-  -H "X-API-Key: <YOUR_API_KEY>" \
-  -H "X-Install-Secret: <INSTALL_SECRET>" \
-  -H "Content-Type: application/json" \
-  -d '{"daily_checkin": {"enabled": true, "time": "09:00"}}'
+withyou-backend/
+├─ supabase/
+│  ├─ config.toml                       # Supabase CLI project (anonymous sign-ins on, ai: verify_jwt = false)
+│  ├─ migrations/
+│  │  └─ 20261009120000_ai_usage.sql    # usage tables, ai_consume_quota, retention job
+│  ├─ tests/database/
+│  │  └─ ai_usage.test.sql              # pgTAP tests (supabase test db)
+│  └─ functions/
+│     ├─ .env.example                   # local secrets template
+│     └─ ai/
+│        ├─ index.ts                    # Deno.serve entry point (wiring only)
+│        ├─ handler.ts                  # request handling, status codes, limits, logging
+│        ├─ tasks.ts                    # per-task validation, prompts, JSON schemas, output clamping
+│        ├─ claude.ts                   # Anthropic SDK call
+│        ├─ supabase.ts                 # token check, quota, deletion (service-role client)
+│        ├─ deno.json                   # pinned npm imports used when bundling
+│        └─ *_test.ts                   # deno test, with fakes (no network)
+├─ scripts/smoke_test.sh                # end-to-end check against a local Supabase stack
+├─ deno.json                            # same pins, plus fmt/lint settings, for running Deno from the repo root
+├─ docs/CUTOVER.md                      # project setup and Fly.io/MongoDB retirement
+└─ .github/workflows/                   # ci.yml (tests), deploy.yml (migrations + function)
 ```
 
 ---
 
-## Tests and Lint
+## Running locally
+
+You need the [Supabase CLI](https://supabase.com/docs/guides/local-development/cli/getting-started), Docker, and [Deno 2](https://docs.deno.com/runtime/getting_started/installation/).
 
 ```bash
-python3.12 -m venv .venv && . .venv/bin/activate
-pip install -r requirements-dev.txt
-ruff check .
-pytest
+supabase start                                   # Postgres, Auth, REST, gateway; applies migrations
+cp supabase/functions/.env.example supabase/functions/.env
+# put a real ANTHROPIC_API_KEY in supabase/functions/.env (it is gitignored)
+supabase functions serve                         # serves http://127.0.0.1:54321/functions/v1/ai
 ```
 
-The tests use `mongomock-motor`, so no MongoDB is needed. CI (`.github/workflows/fly-deploy.yml`) runs the same lint + tests on every pull request and push to `main`; a push to `main` deploys to Fly only after the tests pass.
+Try it (`supabase status` prints the publishable key):
 
----
+```bash
+API=http://127.0.0.1:54321
+KEY=<publishable key from supabase status>
+TOKEN=$(curl -sS -X POST "$API/auth/v1/signup" -H "apikey: $KEY" -H "Content-Type: application/json" -d '{}' | jq -r .access_token)
 
-## Notes / Follow-Ups
+curl -sS -X POST "$API/functions/v1/ai" \
+  -H "apikey: $KEY" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"task": "break_down", "input": {"title": "Clean the kitchen"}}'
+# -> {"ok":true,"task":"break_down","result":{"steps":["...","..."]}}
+```
 
-- **Migrate from Motor to PyMongo's async API.** Motor is deprecated in favour of `pymongo.AsyncMongoClient`. The change is mostly contained to `db.py`; not done yet on purpose.
-- **Require `X-Install-Secret` on register** once every supported app build sends it. Until then a register call without the header is accepted (and logged).
-- **Installs registered by older builds:** the secret was issued to a build that discarded it, and it is never issued again. After updating, such an app cannot authenticate for that install ID and should start over with a fresh install ID (then register). The old install doc is left without devices; consider a periodic cleanup of installs with no devices.
-- Add push delivery metrics and structured logging.
-- Add per-install rate limiting on the API.
-- Done: `apns_environment` is persisted per device; `BadDeviceToken` / `Unregistered` tokens are cleaned up.
+## Tests
 
-Checklist
----------
+```bash
+deno fmt --check
+deno lint
+deno check supabase/functions/ai/index.ts
+deno test -A supabase/functions/ai     # handler, tasks, Claude and Supabase calls, all with fakes
+supabase test db                       # pgTAP: tables, privileges, quota, retention, deletion
+bash scripts/smoke_test.sh             # needs `supabase start`; never calls Anthropic
+```
 
-- [x] Push delivered to real device
-- [x] Mongo writes verified
-- [x] Secrets excluded from repo
-- [x] API + worker dockerized (non-root)
-- [x] Safe defaults when APNs is not configured
-- [x] Tests + lint run in CI before deploy
-- [x] Retention via TTL indexes; user-controlled deletion endpoint
+CI (`.github/workflows/ci.yml`) runs all of these on every pull request. A push to `main` runs the same CI and then `deploy.yml`, which applies migrations and deploys the function when the deploy secrets are set.

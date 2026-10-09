@@ -1,0 +1,61 @@
+name: Deploy to Supabase
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    name: Migrate and deploy
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    steps:
+      - name: Check deploy secrets
+        id: secrets
+        run: |
+          missing=""
+          [ -n "$SUPABASE_ACCESS_TOKEN" ] || missing="$missing SUPABASE_ACCESS_TOKEN"
+          [ -n "$SUPABASE_PROJECT_REF" ] || missing="$missing SUPABASE_PROJECT_REF"
+          [ -n "$SUPABASE_DB_PASSWORD" ] || missing="$missing SUPABASE_DB_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::notice title=Deploy skipped::Missing repository secrets:$missing. Add them to deploy (see docs/CUTOVER.md)."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.secrets.outputs.ready == 'true'
+
+      - uses: supabase/setup-cli@v1
+        if: steps.secrets.outputs.ready == 'true'
+        with:
+          version: latest
+
+      - name: Link the project
+        if: steps.secrets.outputs.ready == 'true'
+        run: supabase link --project-ref "$SUPABASE_PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
+
+      - name: Apply database migrations
+        if: steps.secrets.outputs.ready == 'true'
+        run: supabase db push --linked --password "$SUPABASE_DB_PASSWORD" --yes
+
+      - name: Deploy the ai function
+        if: steps.secrets.outputs.ready == 'true'
+        run: supabase functions deploy ai --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt

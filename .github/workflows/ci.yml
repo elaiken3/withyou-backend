@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  pull_request:
+  # Pushes to main run this through deploy.yml, before deploying.
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  function:
+    name: Edge Function (fmt, lint, check, test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Format
+        run: deno fmt --check
+
+      - name: Lint
+        run: deno lint
+
+      - name: Type check
+        run: deno check supabase/functions/ai/index.ts
+
+      - name: Test
+        run: deno test -A supabase/functions/ai
+
+  database:
+    name: Database tests and smoke test (local Supabase)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Start Supabase (database, auth, REST, gateway, functions)
+        run: supabase start -x studio,imgproxy,mailpit,realtime,storage-api,logflare,vector,supavisor
+
+      - name: Database tests (pgTAP)
+        run: supabase test db
+
+      - name: Smoke test the ai function
+        env:
+          FUNCTIONS_LOG: ${{ runner.temp }}/functions.log
+        run: bash scripts/smoke_test.sh
+
+      - name: Show logs on failure
+        if: failure()
+        env:
+          FUNCTIONS_LOG: ${{ runner.temp }}/functions.log
+        run: |
+          echo "::group::supabase functions serve"
+          cat "$FUNCTIONS_LOG" 2>/dev/null || echo "(no function log)"
+          echo "::endgroup::"
+          echo "::group::containers"
+          docker ps -a
+          echo "::endgroup::"
+          for name in $(docker ps -a --format '{{.Names}}' | grep -E 'supabase_(edge_runtime|auth|rest|kong|db)_'); do
+            echo "::group::$name"
+            docker logs --tail 200 "$name" 2>&1 || true
+            echo "::endgroup::"
+          done

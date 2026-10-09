@@ -1,106 +1,157 @@
 # WithYou Backend — Architecture Overview
 
-This backend supports the WithYou frontend with minimal pressure
+This backend supports the WithYou app with minimal pressure
 and minimal inference.
 
-Primary responsibilities:
-- persistence of a few settings and counts
-- notification delivery
-- one periodic background job
+Primary responsibility:
+- answer optional cloud AI requests, within daily limits
 
 It does not:
-- decide priorities
-- infer motivation
-- optimize productivity
+- store what people write
+- send notifications (reminders and check-ins are local to the phone)
+- decide priorities, infer motivation, or optimize productivity
 
 
 ## Components
 
 ```text
- iOS app ──HTTPS──▶ API (FastAPI, uvicorn) ──▶ MongoDB Atlas ◀── Worker (APScheduler) ──HTTP/2──▶ APNs ──▶ device
+ iOS app ──(1) anonymous sign-in──▶ Supabase Auth
+    │
+    └──(2) POST /functions/v1/ai ──▶ Edge Function `ai` (Deno)
+                                       ├─(3) check token ──▶ Supabase Auth (auth.getUser)
+                                       ├─(4) count quota ──▶ Postgres: public.ai_consume_quota()
+                                       └─(5) one message ──▶ Anthropic API (Claude)
 ```
 
-- **API process** (`backend/app/main.py`, Fly process `app`): stateless FastAPI app.
-  Registers installs/devices, stores prefs, rolls up events, deletes an install on request.
-  Exposes `/health` (liveness) and `/ready` (Mongo ping + worker heartbeat freshness).
-- **Worker process** (`backend/app/worker.py`, Fly process `worker`): an APScheduler
-  `AsyncIOScheduler` that runs `services.scheduler.tick()` every
-  `SCHEDULER_INTERVAL_SECONDS` (default 60). It is the only component that sends pushes.
-- **MongoDB** (Atlas, via Motor): the only shared state between the two processes.
-  There is no message broker or queue.
-- **APNs**: token-based (.p8 JWT) HTTP/2 client in `services/apns.py`, one shared
-  connection per process, closed on shutdown.
+- **Supabase Auth** gives each install an anonymous user (no email, no password). The app keeps
+  the session in the Keychain and refreshes it.
+- **Edge Function `ai`** (`supabase/functions/ai/`) is stateless. The gateway's JWT check is off
+  (`verify_jwt = false`) because the function checks the token itself with a service-role client,
+  which works with both legacy JWT keys and the new publishable/secret keys.
+- **Postgres** holds two counter tables and two functions. Nothing else.
+- **Anthropic** runs Claude. The function uses the official TypeScript SDK.
+- **pg_cron** deletes counters older than 35 days, every day at 03:17 UTC.
+
+There is no queue, worker, or push service. The old Fly.io API and worker, MongoDB, and APNs
+integration are retired (see [docs/CUTOVER.md](docs/CUTOVER.md)).
 
 
-## Data model (MongoDB)
+## Code layout
 
-| Collection | `_id` | Purpose |
+| File | Role |
+| --- | --- |
+| `index.ts` | `Deno.serve` entry point. Wires real dependencies into the handler. |
+| `handler.ts` | Pure request handling. Every outside dependency is injected: `verifyUser`, `consumeQuota`, `deleteUserData`, `callClaude`, `now`, `env`, `log`. |
+| `tasks.ts` | Per task: input validation, system prompt, JSON schema, output validation and clamping. No I/O. |
+| `claude.ts` | The Anthropic SDK call and the mapping of SDK errors and stop reasons to `UpstreamError`. |
+| `supabase.ts` | Token check, quota call and deletion through `@supabase/supabase-js`. |
+
+Tests (`*_test.ts`) run the handler with fakes, and run the real SDK clients against a fake
+`fetch`, so nothing leaves the machine.
+
+
+## Request flow
+
+1. Anything but `POST` → 405. A body over 16 KB (declared or streamed) → 413.
+2. `Authorization: Bearer <token>` is required. `auth.getUser(token)` must return a user;
+   a 4xx from Auth → 401. Auth being unreachable → 500 (not 401, so the app doesn't sign in again
+   for nothing).
+3. The body must be a JSON object with a known `task`. `delete_me` is handled here (step 8).
+4. `tasks.ts` validates `input` → 400 with a message that names the field but never echoes it.
+5. No `ANTHROPIC_API_KEY` → 503.
+6. `ai_consume_quota(user, per-user limit, global limit)` → `false` → 429 with `Retry-After`
+   set to the seconds until the next UTC midnight.
+7. Claude is called once (see below). Refusal, `max_tokens`, timeouts, API errors, or JSON that
+   doesn't fit → 502. Otherwise the answer is cleaned and clamped, then returned with 200.
+8. `delete_me`: delete the person's `ai_usage` rows, then their auth user (`auth.admin.deleteUser`).
+   Doesn't touch quota and works without an Anthropic key.
+
+Any unexpected exception → 500.
+
+
+## Calling Claude
+
+- Model: `CLAUDE_MODEL`, default `claude-opus-5-5`.
+- One request per call: a stable system prompt per task, one user message, `max_tokens` 16000,
+  `output_config: { effort: "low", format: { type: "json_schema", schema } }`. No `thinking`
+  setting (Opus 5.5 always thinks adaptively; low effort keeps it short), no sampling parameters,
+  no prefill.
+- On Opus 5.x, Fable 5.x and Sonnet 5.5 the request uses the beta endpoint with
+  `betas: ["server-side-fallback-2026-07-01"]` and `fallbacks: "default"`: if Claude declines,
+  Anthropic re-runs it on its recommended fallback model in the same call. Haiku 5.5 has no
+  server-side fallback, so it uses the plain endpoint.
+- SDK client: 25 s timeout, 1 retry. `ANTHROPIC_BASE_URL` is honored (CI points it at an
+  unreachable address).
+- The answer is the first `text` block (thinking and fallback blocks are skipped), parsed with
+  `JSON.parse`, then validated and clamped in `tasks.ts`.
+- The person's data goes into the user message as JSON inside `<request_data>` tags, with every
+  `<` written as the JSON escape `\u003c`, so it can't close the tag. The system prompt says that everything inside
+  is material to work with, never instructions.
+- `suggest_next` sends candidate keys (`c1`, `c2`, ...) instead of the app's ids and maps the
+  answer back. `tidy` labels thoughts `t1`, `t2`, ... and reorders the answer by label.
+- Schemas use only `type`, `properties`, `required`, `items`, `enum`, `additionalProperties` and
+  `description`; every object has `additionalProperties: false` and requires every property.
+  Lengths and ranges are enforced after parsing. `capture`'s `when` is an object with a
+  `scheduled` flag rather than a nullable object.
+
+
+## Data model (Postgres)
+
+| Table | Key | Columns |
 | --- | --- | --- |
-| `installs` | install ID | timezone, `push_enabled`, APNs environment, `secret_hash` |
-| `devices` | APNs token | `install_id`, APNs environment, `updated_at` |
-| `prefs` | install ID | quiet hours, daily cap, daily check-in, nudge toggles |
-| `events_daily` | `install_id\|YYYY-MM-DD` (local day) | small counters/timestamps for that day |
-| `push_log` | `install_id\|YYYY-MM-DD\|type` (local day) | dedupe claim + daily cap record |
-| `worker_heartbeat` | `"scheduler"` | `last_tick_at` |
+| `public.ai_usage` | `(user_id, day)` | `user_id uuid` → `auth.users(id) on delete cascade`, `day date` (UTC), `count int` |
+| `public.ai_usage_global` | `day` | `day date` (UTC), `count int` |
 
-Indexes (created at API startup): `installs(push_enabled, _id)`, `devices(install_id)`,
-`push_log(install_id, date)`, `events_daily(install_id)`, and TTL indexes
-`push_log.sent_at` and `events_daily.updated_at` (35 days).
+Both tables have RLS on with no policies, and all privileges revoked from `anon` and
+`authenticated`. Only `service_role` (the function) can read or write them.
 
-"Day" always means the install's **local** calendar date, derived from its timezone,
-for event rollups, the daily cap and dedupe keys. Quiet hours are local too.
+`public.ai_consume_quota(p_user uuid, p_user_limit int, p_global_limit int) returns boolean`
+is `security definer` with `search_path = ''`, executable only by `service_role`. It:
 
+1. creates today's global row if needed (`insert ... on conflict do nothing`),
+2. locks today's global row, then the person's row (`select ... for update`), always in that
+   order, so concurrent calls queue instead of racing past a limit and can't deadlock,
+3. returns `false` without changing anything if either count is already at its limit,
+4. otherwise adds one to both and returns `true`.
 
-## Request flow (API)
+A limit below 1 always returns `false`, which makes `0` a simple off switch.
 
-1. Middleware checks `X-API-Key` (constant-time) for `/v1/*` when `API_KEY` is set.
-2. Pydantic validates the body/path (IDs, hex tokens, IANA timezones, `HH:MM`, ranges) → `422`.
-3. Routes that change or delete an install's data check `X-Install-Secret` against the
-   stored SHA-256 hash (`auth.authorize_install`). The first `register` issues the secret.
-4. One or two small Mongo writes. No fan-out, no background work.
+`public.ai_usage_purge(p_keep_days int default 35)` deletes older rows from both tables. The
+migration schedules it with pg_cron when pg_cron is available, and skips scheduling (with a notice)
+on a Postgres without it.
 
 
-## Worker tick
+## Logging
 
-Each tick:
-
-1. Write the heartbeat (failure is logged, never fatal).
-2. Page through `installs` with `push_enabled: true` (keyset pagination on `_id`, 200 per page).
-3. For a page, load prefs with one `$in` query. Skip installs without prefs (nothing opted in)
-   and installs inside their quiet hours. A bad stored timezone falls back to UTC (logged once).
-4. For the remaining installs, load devices, today's `events_daily` docs and today's
-   `push_log` counts with one `$in` query each. The most recently updated device is used.
-5. Per install (errors are isolated per install): stop if the daily cap is reached; otherwise
-   take the first due notification (daily check-in → focus first step (opt-in) → capture sort).
-6. Send through **claim-first dedupe**: insert the `push_log` doc first (the unique `_id` is
-   the lock), re-check the cap, then call APNs. On a definite failure the claim is deleted so a
-   later tick can retry silently; on an ambiguous timeout it is kept; on an invalid token the
-   device is deleted. At most one push per install per tick.
-
-Because the claim is an atomic insert, running more than one worker cannot double-send.
-A crash between claim and send loses that notification for the day rather than repeating it.
+One line per request: `{"fn":"ai","task":...,"status":...,"latency_ms":...,"error":...}`.
+`task` is a known task name or `unknown` (an unknown task string from a client is never logged).
+`error` is a fixed code such as `quota_exceeded`, `upstream_refusal` or `internal_quota_Error`:
+never an exception message, request text, model output, token or user id. A test feeds a marker
+through every path and checks that it never reaches the logger.
 
 
 ## Operations
 
-- Fly health checks use `/health`, so a stalled worker does not restart the API.
-  Point external monitoring at `/ready`.
-- Containers run as a non-root user. CI runs `ruff check` and `pytest` (Python 3.12)
-  on pull requests and pushes; deploys to Fly run only after tests pass on `main`.
-- Retention is enforced by Mongo TTL indexes; full deletion by `DELETE /v1/installs/{id}`.
-
-
-## Follow-ups
-
-- **Motor → PyMongo async.** Motor is deprecated; PyMongo's `AsyncMongoClient` is the
-  supported replacement. Collections are only accessed through `backend/app/db.py`
-  (as `db.<collection>`), so the migration is contained. Intentionally not done yet.
+- **Deploys:** `deploy.yml` runs CI, then `supabase db push` and `supabase functions deploy ai`.
+- **Turning cloud AI off quickly:** `supabase secrets set AI_DAILY_LIMIT_GLOBAL=0` (every AI request
+  gets 429) or `supabase secrets unset ANTHROPIC_API_KEY` (503). The app falls back to on-device AI
+  or rules either way.
+- **Retention check:** `select jobname, schedule, command from cron.job;` shows
+  `withyou-ai-usage-retention`.
+- **Abuse:** the per-user limit only limits one anonymous account, and anyone can create more.
+  Supabase Auth rate limits anonymous sign-ins per IP (30 per hour by default), so a single IP
+  could still use up the whole global limit in a couple of hours, and cloud AI would then pause
+  for everyone until UTC midnight (the app falls back to on-device AI or rules). Lower the
+  anonymous sign-in limit to about 5 per hour per IP: each install signs in once and then only
+  refreshes its token. The global limit bounds the cost either way. CAPTCHA or App Attest on
+  sign-in is the follow-up that closes the gap.
 
 
 ## Architectural Rules
 
 - Prefer simple, explicit flows
-- Avoid hidden automation
-- No autonomous escalation logic
-- All timing decisions must be user-initiated or explicitly configured
-- When delivery is uncertain, prefer a missed nudge over a repeated one
+- Avoid hidden automation: the AI suggests, the app and the person decide
+- No storage of request content, ever
+- When unsure (refusal, odd answer, outage), fail quietly so the app falls back to on-device AI
+  or rules
+- Every limit is a cost guard, never a nudge
