@@ -21,12 +21,14 @@ primary_region = "iad"
   [[services.ports]]
     port = 80
     handlers = ["http"]
+    force_https = true
 
   [[services.ports]]
     port = 443
     handlers = ["tls", "http"]
 
-  # Basic health check against your /health endpoint
+  # Liveness check against /health. /ready (Mongo + worker heartbeat) is for
+  # external monitoring; using it here would restart the API when the worker stalls.
   [[services.http_checks]]
     interval = "15s"
     grace_period = "10s"

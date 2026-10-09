@@ -1,19 +1,20 @@
 import asyncio
 import logging
 import signal
-from datetime import timezone
+from datetime import UTC
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .config import settings
-from .services.scheduler import tick
 from .services.apns import close_client
-
+from .services.scheduler import tick
 
 logger = logging.getLogger("withyou.worker")
 
+
 async def main():
     logging.basicConfig(level=logging.INFO)
-    scheduler = AsyncIOScheduler(timezone=timezone.utc)
+    scheduler = AsyncIOScheduler(timezone=UTC)
     scheduler.add_job(
         tick,
         "interval",

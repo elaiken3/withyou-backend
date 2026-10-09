@@ -1,10 +1,14 @@
-fastapi
-uvicorn[standard]
-motor
-pydantic-settings
-python-dateutil
-APScheduler
-httpx[http2]
-pyjwt
-cryptography
-certifi
+# Direct dependencies, pinned to the versions the test suite runs against.
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+motor==3.7.1
+pymongo==4.18.3
+pydantic==2.14.0
+pydantic-settings==2.15.0
+python-dateutil==2.9.0.post0
+APScheduler==3.11.3
+httpx[http2]==0.28.1
+pyjwt==2.15.1
+cryptography==50.0.2
+certifi==2026.7.22
+tzdata==2026.5

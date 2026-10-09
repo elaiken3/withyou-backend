@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional, Dict, Any
+from typing import Any
 
 import httpx
 import jwt  # PyJWT
@@ -17,8 +17,8 @@ class APNSTokenInvalid(RuntimeError):
         self.reason = reason
 
 
-_client: Optional[httpx.AsyncClient] = None
-_cached_jwt: Optional[str] = None
+_client: httpx.AsyncClient | None = None
+_cached_jwt: str | None = None
 _cached_jwt_exp: int = 0  # unix seconds
 logger = logging.getLogger("withyou.apns")
 
@@ -34,7 +34,7 @@ def apns_configured() -> bool:
     )
 
 
-def _apns_base_url(apns_environment: Optional[str]) -> str:
+def _apns_base_url(apns_environment: str | None) -> str:
     if apns_environment == "sandbox":
         use_sandbox = True
     elif apns_environment == "production":
@@ -74,7 +74,7 @@ def _get_apns_jwt() -> str:
     headers = {"alg": "ES256", "kid": settings.apns_key_id}
     claims = {"iss": settings.apns_team_id, "iat": now}
 
-    with open(settings.apns_auth_key_path, "r", encoding="utf-8") as f:
+    with open(settings.apns_auth_key_path, encoding="utf-8") as f:
         private_key = f.read()
 
     token = jwt.encode(
@@ -99,7 +99,7 @@ async def send_alert(
     body: str,
     badge: int | None = None,
     deep_link: str | None = None,
-    apns_environment: Optional[str] = None,
+    apns_environment: str | None = None,
 ) -> None:
     if not apns_configured():
         logger.info("[APNS NOT CONFIGURED] Would have sent: %s %s", title, body)
@@ -108,7 +108,7 @@ async def send_alert(
     auth = _get_apns_jwt()
     client = _get_http2_client()
 
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "aps": {
             "alert": {"title": title, "body": body},
             "sound": "default",
